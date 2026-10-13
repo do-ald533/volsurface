@@ -16,7 +16,9 @@ class IbkrOptions:
     max_lines: int = 80
     expiries: int = 6
     band: float = 0.08
-    market_data_type: int = 1
+    min_days: int = 3
+    max_days: int = 120
+    market_data_type: int = 3
     connect_timeout_s: float = 10.0
     rate: float = 0.04
     dividend_yield: float = 0.012

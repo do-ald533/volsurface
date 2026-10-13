@@ -118,6 +118,113 @@ async def test_a_session_can_be_restarted_after_stopping() -> None:
         await session.stop()
 
 
+async def test_switching_source_while_streaming_replaces_the_provider() -> None:
+    updates: list[SurfaceComputed] = []
+    states: list[SessionState] = []
+    config = _config()
+    factory = ProviderFactory()
+    factory.register(
+        "synthetic",
+        lambda spec, options: SyntheticProvider(replace(config, underlying=spec.symbol)),
+    )
+    async with AsyncEventBus() as bus:
+        bus.subscribe(SurfaceComputed, updates.append)
+        bus.subscribe(SessionStateChanged, lambda e: states.append(e.state))
+        pipe = SurfacePipeline(NumbaCpuBackend(), SETTINGS)
+        session = MarketSession(bus, pipe, factory, ProviderOptions())
+        await session.start(SourceSpec.parse("synthetic:AAA"))
+        await wait_until(lambda: len(updates) >= 1)
+        await session.switch(SourceSpec.parse("synthetic:BBB"))
+        await wait_until(lambda: any(u.update.chain.underlying == "BBB" for u in updates))
+        await asyncio.sleep(0.1)
+        assert session.state is SessionState.STREAMING
+        assert updates[-1].update.chain.underlying == "BBB"
+        assert SessionState.STOPPED in states
+        await session.stop()
+
+
+async def test_switch_on_an_idle_session_just_starts() -> None:
+    async with AsyncEventBus() as bus:
+        session = _session(bus, _config())
+        await session.switch(SYN_SPEC)
+        assert session.state in {SessionState.CONNECTING, SessionState.STREAMING}
+        await session.stop()
+
+
+async def test_connection_events_from_another_source_are_ignored() -> None:
+    from volsurface.domain.events import ConnectionState, ConnectionStateChanged  # noqa: PLC0415
+
+    async with AsyncEventBus() as bus:
+        session = _session(bus, _config(interval_s=1.0))
+        await session.start(SYN_SPEC)
+        await wait_until(lambda: session.state is SessionState.STREAMING)
+        bus.publish(ConnectionStateChanged(source="someone-else", state=ConnectionState.FAILED))
+        await bus.drain()
+        assert session.state is SessionState.STREAMING
+        await session.stop()
+
+
+def test_every_connection_state_maps_to_a_session_state() -> None:
+    from volsurface.app.session import _CONNECTION_TO_SESSION  # noqa: PLC0415
+    from volsurface.domain.events import ConnectionState  # noqa: PLC0415
+
+    assert set(_CONNECTION_TO_SESSION) == set(ConnectionState)
+
+
+async def test_a_connecting_event_from_the_active_source_is_harmless() -> None:
+    from volsurface.domain.events import (  # noqa: PLC0415
+        ConnectionState,
+        ConnectionStateChanged,
+        HandlerFailed,
+    )
+
+    failures: list[HandlerFailed] = []
+    async with AsyncEventBus() as bus:
+        bus.subscribe(HandlerFailed, failures.append)
+        session = _session(bus, _config(interval_s=1.0))
+        await session.start(SYN_SPEC)
+        await wait_until(lambda: session.state is SessionState.STREAMING)
+        bus.publish(ConnectionStateChanged(source="synthetic", state=ConnectionState.CONNECTING))
+        await bus.drain()
+        assert failures == []
+        assert session.state is SessionState.STREAMING
+        await session.stop()
+
+
+async def test_setup_progress_is_republished_as_state_events_with_the_same_state() -> None:
+    from helpers import FakeGateway, fake_options  # noqa: PLC0415
+    from volsurface.marketdata.ibkr import IbkrProvider  # noqa: PLC0415
+
+    seen: list[SessionStateChanged] = []
+    factory = ProviderFactory()
+    factory.register(
+        "ibkr",
+        lambda spec, options: IbkrProvider(
+            "SPY",
+            fake_options(),
+            gateway_factory=lambda symbol, opts: FakeGateway(),
+            poll_interval_s=0.01,
+            warmup_s=0.0,
+        ),
+    )
+    async with AsyncEventBus() as bus:
+        bus.subscribe(SessionStateChanged, seen.append)
+        session = MarketSession(
+            bus, SurfacePipeline(NumbaCpuBackend(), SETTINGS), factory, ProviderOptions()
+        )
+        await session.start(SourceSpec.parse("ibkr:SPY"))
+        await wait_until(lambda: session.state is SessionState.STREAMING)
+        await session.stop()
+        await bus.drain()
+    progress = [e for e in seen if e.previous is e.state is SessionState.CONNECTING]
+    details = " | ".join(e.detail for e in progress)
+    assert "connecting to TWS" in details and "listing strikes" in details
+    assert [e.state for e in seen if e.previous is not e.state][:2] == [
+        SessionState.CONNECTING,
+        SessionState.STREAMING,
+    ]
+
+
 async def test_provider_start_failure_marks_the_session_failed() -> None:
     class Broken:
         name = "broken"

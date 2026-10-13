@@ -14,7 +14,14 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from volsurface import __version__
 from volsurface.analytics.alerts import Alert
-from volsurface.app.commands import Command, Freeze, Resume, SetRecording, StartSession, StopSession
+from volsurface.app.commands import (
+    Command,
+    Freeze,
+    Resume,
+    SetRecording,
+    StopSession,
+    SwitchSource,
+)
 from volsurface.app.container import AppContainer
 from volsurface.app.events import SessionStateChanged
 from volsurface.app.results import SessionUpdate
@@ -32,6 +39,8 @@ from volsurface.ui.widgets.surface import SurfacePanel
 
 _IDLE_STATES = frozenset({SessionState.IDLE, SessionState.STOPPED, SessionState.FAILED})
 _LIVE_STATES = frozenset({SessionState.STREAMING, SessionState.FROZEN})
+_SETUP_STATES = frozenset({SessionState.CONNECTING, SessionState.RECONNECTING})
+_DEFAULT_SYMBOLS = {"synthetic": "SYN", "ibkr": "SPY"}
 SETTINGS_ORG = "volsurface"
 SETTINGS_APP = "desk"
 
@@ -56,6 +65,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._replay_path: Path | None = None
         self.last_error = ""
         self.frames_rendered = 0
+        self._has_data = False
         self.setWindowTitle(f"Volsurface Desk {__version__}")
         self.resize(1500, 920)
 
@@ -118,6 +128,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.source.setCurrentText(SourceSpec.parse(initial_source).kind)
         self.symbol = QtWidgets.QLineEdit(SourceSpec.parse(initial_source).symbol)
         self.symbol.setMaximumWidth(90)
+        self._source_kind = self.source.currentText()
         self.browse = QtWidgets.QPushButton("Recording ...")
         self.start_action = QtGui.QAction("Start", self)
         self.stop_action = QtGui.QAction("Stop", self)
@@ -154,6 +165,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.record_action.toggled.connect(self._on_record_toggled)
 
     def _on_source_changed(self, kind: str) -> None:
+        if kind in _DEFAULT_SYMBOLS:
+            typed = self.symbol.text().strip().upper()
+            if typed == _DEFAULT_SYMBOLS.get(self._source_kind):
+                self.symbol.setText(_DEFAULT_SYMBOLS[kind])
+            self._source_kind = kind
         self.symbol.setEnabled(kind != "replay")
         self.browse.setVisible(kind == "replay")
 
@@ -177,7 +193,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError as exc:
             self._show_error(str(exc))
             return
-        self.issue(StartSession(spec))
+        self.issue(SwitchSource(spec))
 
     def _on_freeze_toggled(self, frozen: bool) -> None:
         if frozen and self._state is SessionState.STREAMING:
@@ -226,8 +242,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def draw_update(self, update: SessionUpdate) -> None:
         self.frames_rendered += 1
         if update.surface is not None:
+            self._has_data = True
+            self.surface_panel.set_notice("")
             self.surface_panel.set_mesh(surface_mesh(update.surface))
             self.term.set_term_structure(term_structure(update.surface))
+        else:
+            self._has_data = False
+            self.surface_panel.clear_data()
+            self.term.clear()
+            usable = int(update.usable.sum())
+            self.surface_panel.set_notice(
+                f"no surface yet: {usable} of {update.chain.size} options pass the quote filters"
+            )
         self.smile.set_update(update)
         self.chain.set_table(chain_table(update))
         self.gex.set_view(gex_view(update))
@@ -239,19 +265,51 @@ class MainWindow(QtWidgets.QMainWindow):
         if update.warnings:
             self.statusBar().showMessage("; ".join(update.warnings), 4000)
 
+    def clear_views(self) -> None:
+        """Empty every chart so stale data from the previous source can never look current."""
+        self._has_data = False
+        self._pending = None
+        self.surface_panel.clear_data()
+        self.smile.clear()
+        self.term.clear()
+        self.chain.clear()
+        self.gex.clear()
+
     def on_state(self, event: SessionStateChanged) -> None:
+        starting = event.state in _SETUP_STATES and event.previous not in _SETUP_STATES
+        if starting or (
+            event.state is SessionState.RECONNECTING and event.previous is not event.state
+        ):
+            self.clear_views()
         self._apply_state(event.state, event.detail)
+        if event.state is SessionState.FAILED and event.detail:
+            self._show_error(event.detail)
 
     def _apply_state(self, state: SessionState, detail: str = "") -> None:
         self._state = state
         self._state_label.setText(state.value + (f" ({detail})" if detail else ""))
-        self.start_action.setEnabled(state in _IDLE_STATES)
-        self.stop_action.setEnabled(state not in _IDLE_STATES)
+        idle = state in _IDLE_STATES
+        self.start_action.setText("Start" if idle else "Switch")
+        self.stop_action.setEnabled(not idle)
         self.freeze_action.setEnabled(state in _LIVE_STATES)
         with QtCore.QSignalBlocker(self.freeze_action):
             self.freeze_action.setChecked(state is SessionState.FROZEN)
-        self.source.setEnabled(state in _IDLE_STATES)
-        self.symbol.setEnabled(state in _IDLE_STATES and self.source.currentText() != "replay")
+        self.symbol.setEnabled(self.source.currentText() != "replay")
+        if not self._has_data:
+            self.surface_panel.set_notice(self._notice_for(state, detail))
+
+    @staticmethod
+    def _notice_for(state: SessionState, detail: str) -> str:
+        """What to say above the empty charts while there is no data to draw."""
+        if state is SessionState.CONNECTING:
+            return detail or "connecting ..."
+        if state is SessionState.RECONNECTING:
+            return f"reconnecting: {detail}" if detail else "reconnecting ..."
+        if state is SessionState.STREAMING:
+            return "waiting for the first quotes ..."
+        if state is SessionState.FAILED:
+            return f"failed: {detail}" if detail else "failed"
+        return ""
 
     def on_alert(self, alert: Alert) -> None:
         self.gex.add_alert(alert)

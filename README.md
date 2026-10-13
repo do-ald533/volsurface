@@ -36,6 +36,15 @@ A Monte Carlo notebook that ties prices to the implied-vol solver and the smile 
 Sources: `synthetic[:SYMBOL]`, `replay:/path/to/recording`, `ibkr[:SYMBOL]` (needs TWS or IB
 Gateway with the API enabled; default paper port 7497, see `.env.example`).
 
+The default source is the built-in synthetic market (symbol `SYN`, spot 100), so a plain
+`volsurface gui` shows no real prices. For real SPY options, start TWS or IB Gateway, then either
+pick `ibkr` in the toolbar (the symbol box switches to `SPY`) and press Start, or run
+`uv run volsurface gui --source ibkr:SPY`. `VOLSURFACE_IBKR__MARKET_DATA_TYPE` selects live (1),
+frozen (2), delayed (3, the default) or delayed-frozen (4) data. Per IBKR's API documentation,
+delayed data is free and 15 to 20 minutes behind, and TWS keeps sending live data if the account
+has a subscription, so 3 works for everyone. Type 1 on an account without a live API subscription
+fails with IBKR error 10168, which the app reports and does not retry.
+
 ```text
 $ uv run volsurface demo --ticks 1
 SYN  2026-10-02 14:00:00 UTC  spot 100.00  528 options, 264 usable
@@ -57,7 +66,15 @@ SYN  2026-10-02 14:00:00 UTC  spot 100.00  528 options, 264 usable
 | GEX and alerts | `analytics/` | profile on an 81-point grid, flip level, three alert rules | [math](docs/math/gex.md) |
 | Monte Carlo | `pricing/montecarlo/` | GBM, Heston, rainbow, Asian; bit-reproducible under threading | [math](docs/math/monte-carlo.md) |
 | Market data | `marketdata/` | synthetic (ground truth), replay, IBKR (`ib_async`), recorder | [architecture](docs/architecture.md) |
-| Desktop GUI | `ui/` | docked panels, 3D + heatmap, SVI smile, chain table, GEX, diagnostics, pricing lab | [architecture](docs/architecture.md) |
+| Desktop GUI | `ui/` | docked panels, 3D + heatmap, SVI smile, chain table, GEX, diagnostics, pricing lab with hover tooltips | [architecture](docs/architecture.md) |
+
+The Pricing Lab charts respond to the mouse: hover the Black-Scholes chart (value, delta, gamma,
+vega, theta or rho against spot, with the American tree and intrinsic value), the Monte Carlo
+convergence plot, or the Newton-Raphson iterations to see the numbers at that point.
+
+| Black-Scholes / American | Monte Carlo | Newton-Raphson |
+|---|---|---|
+| ![Black-Scholes chart](docs/images/lab-black-scholes.png) | ![Monte Carlo chart](docs/images/lab-monte-carlo.png) | ![Newton chart](docs/images/lab-newton.png) |
 
 ## Architecture in one picture
 

@@ -133,7 +133,7 @@ def surface_axis_labels(
             title=True,
             align="center",
         ),
-        AxisLabel((half + 3.6, 0.0, 0.0), "Days to expiry", title=True),
+        AxisLabel((half + 2.8, 0.0, 0.0), "Days to expiry", title=True),
         AxisLabel(
             (-half - pad, -half - pad, height + 1.0), "Implied vol (%)", title=True, align="center"
         ),

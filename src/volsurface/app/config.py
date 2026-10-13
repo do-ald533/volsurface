@@ -29,7 +29,9 @@ class IbkrSettings(BaseModel):
     max_lines: int = Field(default=80, ge=5, le=10_000)
     expiries: int = Field(default=6, ge=1, le=24)
     band: float = Field(default=0.08, gt=0.0, lt=1.0)
-    market_data_type: Literal[1, 2, 3, 4] = 1
+    min_days: int = Field(default=3, ge=0)
+    max_days: int = Field(default=120, ge=1)
+    market_data_type: int = Field(default=3, ge=1, le=4)
     connect_timeout_s: float = Field(default=10.0, gt=0.0)
     rate: float = Field(default=0.04, ge=-0.05, le=0.5)
     dividend_yield: float = Field(default=0.012, ge=0.0, le=0.5)

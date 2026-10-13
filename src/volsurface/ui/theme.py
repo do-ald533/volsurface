@@ -22,6 +22,7 @@ WARNING: Final = "#d29922"
 MAGENTA: Final = "#d070ff"
 
 COLORMAP: Final = "magma"
+COLORMAP_START: Final = 0.3
 
 _STYLESHEET: Final = f"""
 QWidget {{ background-color: {PANEL}; color: {TEXT}; font-size: 12px; }}
@@ -83,7 +84,9 @@ def style_plot(plot: pg.PlotWidget) -> None:
 
 
 def colormap() -> pg.ColorMap:
-    return pg.colormap.get(COLORMAP)
+    """The surface colour map without its near-black low end, which vanishes on the dark plot."""
+    stops = pg.colormap.get(COLORMAP).getLookupTable(COLORMAP_START, 1.0, 64, alpha=True)
+    return pg.ColorMap(np.linspace(0.0, 1.0, 64), stops)
 
 
 def colour_lut(size: int = 256) -> FloatArray:

@@ -28,11 +28,15 @@ from volsurface.marketdata.factory import ProviderFactory, ProviderOptions, Sour
 _log = get_logger(__name__)
 
 _CONNECTION_TO_SESSION = {
+    ConnectionState.CONNECTING: SessionState.CONNECTING,
     ConnectionState.CONNECTED: SessionState.STREAMING,
     ConnectionState.RECONNECTING: SessionState.RECONNECTING,
     ConnectionState.FAILED: SessionState.FAILED,
     ConnectionState.DISCONNECTED: SessionState.STOPPED,
 }
+
+
+_PROGRESS_STATES = frozenset({SessionState.CONNECTING, SessionState.RECONNECTING})
 
 
 class MarketSession:
@@ -86,6 +90,13 @@ class MarketSession:
                 self._machine.move_to(SessionState.FAILED, str(exc))
             raise ProviderError(f"could not start {spec}: {exc}") from exc
 
+    async def switch(self, spec: SourceSpec) -> None:
+        """Stop what is running, let its last chains finish, then start ``spec``."""
+        if self._machine.is_running:
+            await self.stop()
+            await self._wait_for_pipeline()
+        await self.start(spec)
+
     async def stop(self) -> None:
         provider, self._provider = self._provider, None
         if provider is not None:
@@ -109,10 +120,17 @@ class MarketSession:
         self._bus.publish(SessionStateChanged(previous=previous, state=state, detail=detail))
 
     async def _on_connection(self, event: ConnectionStateChanged) -> None:
+        if self._provider is None or event.source != self._provider.name:
+            return
         target = _CONNECTION_TO_SESSION[event.state]
         if target is SessionState.STOPPED:
             await self._wait_for_pipeline()
-        if self._machine.state is target or not self._machine.can_move_to(target):
+        state = self._machine.state
+        if state is target:
+            if event.detail and target in _PROGRESS_STATES:
+                self._on_state_change(state, state, event.detail)
+            return
+        if not self._machine.can_move_to(target):
             return
         if target is SessionState.STREAMING and self._machine.state is SessionState.FROZEN:
             return

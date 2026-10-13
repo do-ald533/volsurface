@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -49,7 +50,8 @@ def test_window_streams_renders_and_responds_to_the_toolbar(run_qt, tmp_path: Pa
             await wait_until(lambda: window.frames_rendered >= 3, timeout=20)
             assert app.session.state is SessionState.STREAMING
             assert window.stop_action.isEnabled()
-            assert not window.start_action.isEnabled()
+            assert window.start_action.text() == "Switch"
+            assert window.source.isEnabled() and window.symbol.isEnabled()
             assert window.freeze_action.isEnabled()
             assert window.smile._combo.count() == 3
             assert window.chain.model.rowCount() > 100
@@ -70,7 +72,7 @@ def test_window_streams_renders_and_responds_to_the_toolbar(run_qt, tmp_path: Pa
 
             window.stop_action.trigger()
             await wait_until(lambda: app.session.state is SessionState.STOPPED)
-            assert window.start_action.isEnabled()
+            assert window.start_action.text() == "Start"
             state_text = window._state_label.text()
             window.close()
             return window.frames_rendered, state_text, str(shot)
@@ -80,6 +82,90 @@ def test_window_streams_renders_and_responds_to_the_toolbar(run_qt, tmp_path: Pa
     assert "stopped" in state_text
     assert Path(shot).stat().st_size > 5000
     assert (tmp_path / "window.ini").exists()
+
+
+def test_source_can_be_switched_while_streaming(run_qt, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    config = SyntheticConfig(expiry_days=(14, 30, 60), strike_step=2.0, interval_s=0.03, seed=3)
+    factory = ProviderFactory()
+    factory.register(
+        "synthetic",
+        lambda spec, options: SyntheticProvider(replace(config, underlying=spec.symbol)),
+    )
+
+    async def scenario() -> list[str]:
+        async with open_container(_settings(), factory=factory, warmup=False) as app:
+            bridge = EventBridge()
+            bridge.bind(app.bus)
+            window = MainWindow(app, bridge, settings=_ini(tmp_path))
+            window.show()
+            seen: list[str] = []
+            window.start_action.trigger()
+            await wait_until(lambda: "SYN" in window._source_label.text(), timeout=20)
+            seen.append(window._source_label.text())
+            window.symbol.setText("ABC")
+            window.start_action.trigger()
+            await wait_until(lambda: "ABC" in window._source_label.text(), timeout=20)
+            seen.append(window._source_label.text())
+            assert app.session.state is SessionState.STREAMING
+            window.close()
+            return seen
+
+    first, second = run_qt(scenario)
+    assert "SYN" in first and "ABC" not in first
+    assert "ABC" in second and "SYN" not in second
+
+
+def test_a_failed_session_shows_its_reason_in_the_status_bar(run_qt, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    from volsurface.app.events import SessionStateChanged  # noqa: PLC0415
+
+    async def scenario() -> tuple[str, str]:
+        async with open_container(_settings(), factory=_factory(), warmup=False) as app:
+            bridge = EventBridge()
+            bridge.bind(app.bus)
+            window = MainWindow(app, bridge, settings=_ini(tmp_path))
+            window.on_state(
+                SessionStateChanged(
+                    previous=SessionState.CONNECTING,
+                    state=SessionState.FAILED,
+                    detail="IBKR error 10168: not subscribed",
+                )
+            )
+            return window.last_error, window._state_label.text()
+
+    error, label = run_qt(scenario)
+    assert error == "IBKR error 10168: not subscribed"
+    assert label.startswith("failed")
+
+
+def test_an_update_without_a_surface_clears_the_charts_and_explains_why(
+    run_qt, tmp_path: Path, update
+) -> None:  # type: ignore[no-untyped-def]
+    async def scenario() -> dict[str, object]:
+        async with open_container(_settings(), factory=_factory(), warmup=False) as app:
+            bridge = EventBridge()
+            bridge.bind(app.bus)
+            window = MainWindow(app, bridge, settings=_ini(tmp_path))
+            window.draw_update(update)
+            had_data = window.surface_panel.heatmap.has_data
+            window.draw_update(replace(update, surface=None))
+            return {
+                "had_data": had_data,
+                "heatmap": window.surface_panel.heatmap.has_data,
+                "notice": window.surface_panel.notice,
+                "smile_status": window.smile._status.text(),
+                "smile_points": window.smile._used.getData()[0],
+                "term": window.term._line.getData()[0],
+                "rows": window.chain.model.rowCount(),
+            }
+
+    result = run_qt(scenario)
+    assert result["had_data"] is True
+    assert result["heatmap"] is False
+    assert "no surface yet" in str(result["notice"]) and "options pass" in str(result["notice"])
+    assert result["smile_status"] == "no fitted expiry"
+    assert result["smile_points"] is None or len(result["smile_points"]) == 0
+    assert result["term"] is None or len(result["term"]) == 0
+    assert int(result["rows"]) > 0
 
 
 def test_alerts_and_input_errors_are_surfaced(run_qt, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -97,6 +183,27 @@ def test_alerts_and_input_errors_are_surfaced(run_qt, tmp_path: Path) -> None:  
     count, error = run_qt(scenario)
     assert count == 1
     assert "recording directory" in error
+
+
+def test_symbol_follows_the_source_until_the_user_types_one(run_qt, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    async def scenario() -> list[str]:
+        async with open_container(_settings(), factory=_factory(), warmup=False) as app:
+            bridge = EventBridge()
+            bridge.bind(app.bus)
+            window = MainWindow(app, bridge, settings=_ini(tmp_path))
+            seen = [window.symbol.text()]
+            window.source.setCurrentText("ibkr")
+            seen.append(window.symbol.text())
+            window.source.setCurrentText("replay")
+            window.source.setCurrentText("synthetic")
+            seen.append(window.symbol.text())
+            window.symbol.setText("qqq")
+            window.source.setCurrentText("ibkr")
+            seen.append(window.symbol.text())
+            seen.append(str(window.current_spec()))
+            return seen
+
+    assert run_qt(scenario) == ["SYN", "SPY", "SYN", "qqq", "ibkr:QQQ"]
 
 
 def test_starting_a_missing_replay_reports_the_error(run_qt, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]

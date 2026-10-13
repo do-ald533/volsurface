@@ -17,6 +17,7 @@ from volsurface.app.commands import (
     SetRecording,
     StartSession,
     StopSession,
+    SwitchSource,
 )
 from volsurface.app.config import Settings
 from volsurface.app.diagnostics import DiagnosticsCollector
@@ -77,6 +78,9 @@ async def open_container(
         async def start(command: StartSession) -> None:
             await session.start(command.source)
 
+        async def switch(command: SwitchSource) -> None:
+            await session.switch(command.source)
+
         async def stop(_: StopSession) -> None:
             await session.stop()
 
@@ -96,6 +100,7 @@ async def open_container(
                 recorder.start(command.path)
 
         dispatcher.register(StartSession, start)
+        dispatcher.register(SwitchSource, switch)
         dispatcher.register(StopSession, stop)
         dispatcher.register(Freeze, freeze)
         dispatcher.register(Resume, resume)

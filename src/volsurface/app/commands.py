@@ -23,6 +23,13 @@ class StartSession(Command):
 
 
 @dataclass(frozen=True, slots=True)
+class SwitchSource(Command):
+    """Stop the running session, if any, and start ``source`` in its place."""
+
+    source: SourceSpec
+
+
+@dataclass(frozen=True, slots=True)
 class StopSession(Command):
     pass
 

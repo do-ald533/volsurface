@@ -25,6 +25,10 @@ class ConnectionLostError(ProviderError):
     """The link to a market-data source was lost."""
 
 
+class MarketDataUnavailableError(ProviderError):
+    """The source refuses to send the requested data, so retrying cannot help."""
+
+
 class ConfigurationError(VolsurfaceError):
     """Configuration is missing or inconsistent."""
 

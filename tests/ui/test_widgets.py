@@ -1,12 +1,14 @@
 from dataclasses import replace
 
 import numpy as np
+import pyqtgraph as pg
 import pytest
 from PySide6 import QtCore, QtGui, QtWidgets
 from pytestqt.qtbot import QtBot
 
 from volsurface.analytics.alerts import Alert, AlertKind
 from volsurface.app.diagnostics import DiagnosticsSnapshot
+from volsurface.app.lab import HoverInfo
 from volsurface.app.results import SessionUpdate
 from volsurface.app.session_state import SessionState
 from volsurface.app.viewmodels import (
@@ -16,12 +18,14 @@ from volsurface.app.viewmodels import (
     surface_mesh,
     term_structure,
 )
+from volsurface.domain.errors import InvalidInputError
 from volsurface.pricing.backends import NumbaCpuBackend
 from volsurface.ui import theme
 from volsurface.ui.gl_support import opengl_available
 from volsurface.ui.widgets.chain import ChainTableWidget, format_cell
 from volsurface.ui.widgets.diagnostics import DiagnosticsWidget
 from volsurface.ui.widgets.gex import MAX_ALERTS, GexWidget
+from volsurface.ui.widgets.hover import HoverProbe, format_hover_html
 from volsurface.ui.widgets.lab import MonteCarloTab, NewtonTab, PricingLabWidget, VanillaTab
 from volsurface.ui.widgets.smile import SmileWidget, TermStructureWidget
 from volsurface.ui.widgets.surface import (
@@ -50,6 +54,12 @@ def test_theme_colours() -> None:
     values = theme.colour_values(np.array([[0.0, 0.5], [1.0, 0.25]]))
     assert values.shape == (2, 2, 4)
     assert not np.allclose(values[0, 0], values[1, 0])
+
+
+def test_lowest_surface_colour_is_visible_on_the_dark_background() -> None:
+    lut = theme.colour_lut(64)
+    assert lut[0, :3].max() > 0.35
+    assert lut[-1, :3].max() > 0.9
 
 
 class TestSurfacePanel:
@@ -324,8 +334,225 @@ class TestPricingLab:
         tab.market_vol.setValue(5.0)
         assert tab._message.text()
 
+    def test_vanilla_chart_follows_the_inputs_and_the_chosen_metric(self, qtbot: QtBot) -> None:
+        tab = VanillaTab(NumbaCpuBackend())
+        qtbot.addWidget(tab)
+        x, value = tab._series[0].getData()
+        assert len(x) == len(value) == 121
+        assert len(tab._series[1].getData()[0]) == 121
+        assert len(tab._series[2].getData()[0]) == 121
+        assert "Black-Scholes" in tab._legend.text() and "Intrinsic" in tab._legend.text()
+        assert tab._spot_line.value() == 100.0
+        tab.spot.setValue(95.0)
+        tab.strike.setValue(110.0)
+        assert tab._spot_line.value() == 95.0 and tab._strike_line.value() == 110.0
+        tab.chart_metric.setCurrentText("Gamma")
+        _, gamma = tab._series[0].getData()
+        assert np.all(gamma > 0)
+        assert tab._series[1].getData()[0] is None or len(tab._series[1].getData()[0]) == 0
+        assert "Black-Scholes" not in tab._legend.text() and "Gamma" in tab._legend.text()
+        assert tab._plot.getAxis("left").labelText == "gamma"
+
+    def test_vanilla_chart_empties_and_reports_when_pricing_fails(self, qtbot: QtBot) -> None:
+        class Broken(NumbaCpuBackend):
+            def american_price_gamma(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                raise InvalidInputError("tree exploded")
+
+        tab = VanillaTab(Broken())
+        qtbot.addWidget(tab)
+        assert tab.recompute() is None
+        assert "tree exploded" in tab._output.text()
+        assert tab._curve_data is None
+        assert tab._legend.text() == ""
+        assert tab._series[0].getData()[0] is None
+        assert tab._probe.show_at(100.0, 1.0) is False
+
+    def test_vanilla_chart_survives_extreme_inputs(self, qtbot: QtBot) -> None:
+        tab = VanillaTab(NumbaCpuBackend())
+        qtbot.addWidget(tab)
+        tab.spot.setValue(0.01)
+        tab.strike.setValue(0.01)
+        tab.days.setValue(0.1)
+        tab.vol.setValue(500.0)
+        assert tab.recompute() is not None
+        assert tab._curve_data is not None
+        assert np.isfinite(tab._curve_data.bs_value).all()
+
+    def test_hover_on_each_lab_chart_shows_a_tooltip(self, qtbot: QtBot) -> None:
+        lab = PricingLabWidget(NumbaCpuBackend)
+        qtbot.addWidget(lab)
+        lab.resize(1100, 420)
+        lab.show()
+        qtbot.waitExposed(lab)
+
+        lab.setCurrentWidget(lab.vanilla)
+        assert lab.vanilla._probe.show_at(104.0, 3.0)
+        assert "Spot 104.00" in lab.vanilla._probe.text
+        assert "American tree" in lab.vanilla._probe.text
+
+        lab.monte_carlo.paths.setValue(50_000)
+        assert not lab.monte_carlo._probe.show_at(25_000.0, 9.0)
+        lab.monte_carlo.run_blocking()
+        assert lab.monte_carlo._probe.show_at(25_000.0, 9.0)
+        assert "paths" in lab.monte_carlo._probe.text
+        assert "95% CI" in lab.monte_carlo._probe.text
+        lab.monte_carlo.run_blocking()
+        assert not lab.monte_carlo._probe.visible
+
+        trace = lab.newton._trace
+        assert trace is not None
+        assert lab.newton._probe.show_at(100 * trace.steps[1].sigma, 3.0)
+        assert "Iteration 1" in lab.newton._probe.text
+        lab.newton.slider.setValue(0)
+        assert not lab.newton._probe.visible
+        lab.newton._probe.show_at(100 * trace.steps[1].sigma, 3.0)
+        assert "Iteration" not in lab.newton._probe.text
+
     def test_lab_has_three_tabs(self, qtbot: QtBot) -> None:
         lab = PricingLabWidget(NumbaCpuBackend)
         qtbot.addWidget(lab)
         assert lab.count() == 3
         assert isinstance(lab.widget(1), QtWidgets.QWidget)
+
+
+class TestHoverProbe:
+    @staticmethod
+    def _plot(qtbot: QtBot) -> pg.PlotWidget:
+        plot = pg.PlotWidget()
+        qtbot.addWidget(plot)
+        plot.plot([0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 4.0, 9.0])
+        plot.resize(500, 300)
+        plot.show()
+        qtbot.waitExposed(plot)
+        return plot
+
+    @staticmethod
+    def _describe(x: float) -> HoverInfo | None:
+        if x < 0.0:
+            return None
+        snapped = float(np.clip(round(x), 0, 3))
+        return HoverInfo(
+            snapped,
+            f"x = {snapped:g}",
+            (("y", f"{snapped**2:g}"), ("<b>", "&")),
+            ((snapped, snapped**2),),
+        )
+
+    def test_shows_what_describe_reports_and_hides_when_there_is_nothing(
+        self, qtbot: QtBot
+    ) -> None:
+        plot = self._plot(qtbot)
+        probe = HoverProbe(plot, self._describe)
+        assert not probe.visible
+        assert probe.show_at(1.4, 3.0)
+        assert probe.visible
+        assert "x = 1" in probe.text
+        assert probe._line.value() == 1.0
+        assert not probe.show_at(-5.0, 3.0)
+        assert not probe.visible
+
+    def test_tooltip_text_is_escaped(self) -> None:
+        html = format_hover_html(HoverInfo(0.0, "<i>t</i>", (("<b>", "&"),)))
+        assert "&lt;i&gt;t&lt;/i&gt;" in html and "&lt;b&gt;" in html and "&amp;" in html
+
+    def test_label_stays_inside_the_plot_whatever_the_cursor_position(self, qtbot: QtBot) -> None:
+        plot = self._plot(qtbot)
+        probe = HoverProbe(plot, self._describe)
+        view_box = plot.getPlotItem().vb
+        area = view_box.sceneBoundingRect()
+        (x0, x1), (y0, y1) = view_box.viewRange()
+        for fx in (0.0, 0.5, 1.0):
+            for fy in (0.0, 0.5, 1.0):
+                probe.show_at(x0 + fx * (x1 - x0), y0 + fy * (y1 - y0))
+                inside = probe._label.sceneBoundingRect()
+                assert area.left() - 1 <= inside.left() and inside.right() <= area.right() + 1
+                assert area.top() - 1 <= inside.top() and inside.bottom() <= area.bottom() + 1
+
+    def test_follows_real_mouse_movement_and_hides_when_the_mouse_leaves(
+        self, qtbot: QtBot
+    ) -> None:
+        plot = self._plot(qtbot)
+        probe = HoverProbe(plot, self._describe)
+        view_box = plot.getPlotItem().vb
+        view_box.setRange(xRange=(0.0, 3.0), yRange=(0.0, 9.0), padding=0.0)
+        target = plot.mapFromScene(view_box.mapViewToScene(QtCore.QPointF(2.0, 4.0)))
+        assert plot.viewport().rect().contains(target)
+        viewport = plot.viewport()
+        move = QtGui.QMouseEvent(
+            QtCore.QEvent.Type.MouseMove,
+            QtCore.QPointF(target),
+            QtCore.QPointF(viewport.mapToGlobal(target)),
+            QtCore.Qt.MouseButton.NoButton,
+            QtCore.Qt.MouseButton.NoButton,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+        )
+        QtWidgets.QApplication.sendEvent(viewport, move)
+        qtbot.waitUntil(lambda: probe.visible, timeout=3000)
+        assert "x = 2" in probe.text
+        QtCore.QCoreApplication.sendEvent(plot.viewport(), QtCore.QEvent(QtCore.QEvent.Type.Leave))
+        assert not probe.visible
+
+
+class TestClearing:
+    def test_every_chart_can_be_emptied_after_showing_data(
+        self, qtbot: QtBot, update: SessionUpdate
+    ) -> None:
+        assert update.surface is not None
+        panel, smile, term = SurfacePanel(), SmileWidget(), TermStructureWidget()
+        chain, gex = ChainTableWidget(), GexWidget()
+        for widget in (panel, smile, term, chain, gex):
+            qtbot.addWidget(widget)
+        mesh = surface_mesh(update.surface)
+        assert mesh is not None
+        panel.set_mesh(mesh)
+        smile.set_update(update)
+        term.set_term_structure(term_structure(update.surface))
+        chain.set_table(chain_table(update))
+        gex.set_view(gex_view(update))
+        assert panel.heatmap.has_data and smile._combo.count() > 0
+        assert chain.model.rowCount() > 0 and len(term._line.getData()[0]) > 0
+
+        panel.clear_data()
+        for widget in (smile, term, chain, gex):
+            widget.clear()
+        assert not panel.heatmap.has_data
+        assert panel.count() == 2
+        assert panel.heatmap._image in panel.heatmap.getPlotItem().items
+        assert smile._combo.count() == 0 and smile._status.text() == "no data yet"
+        assert smile._curve.getData()[0] is None or len(smile._curve.getData()[0]) == 0
+        assert term._line.getData()[0] is None or len(term._line.getData()[0]) == 0
+        assert chain.model.rowCount() == 0 and chain._expiry.count() == 1
+        assert gex._summary.text() == "no data yet" and not gex._flip.isVisible()
+
+    def test_clearing_twice_and_before_any_data_is_harmless(self, qtbot: QtBot) -> None:
+        widgets = (
+            SurfacePanel(),
+            SmileWidget(),
+            TermStructureWidget(),
+            ChainTableWidget(),
+            GexWidget(),
+        )
+        for widget in widgets:
+            qtbot.addWidget(widget)
+            widget.clear()
+            widget.clear()
+
+    def test_the_surface_panel_notice(self, qtbot: QtBot) -> None:
+        panel = SurfacePanel()
+        qtbot.addWidget(panel)
+        assert panel.notice == ""
+        panel.set_notice("connecting: loading the SPY option chain")
+        assert panel.notice == "connecting: loading the SPY option chain"
+        panel.set_notice("")
+        assert panel.notice == ""
+
+    def test_the_chain_filter_keeps_working_after_a_clear(
+        self, qtbot: QtBot, update: SessionUpdate
+    ) -> None:
+        chain = ChainTableWidget()
+        qtbot.addWidget(chain)
+        chain.set_table(chain_table(update))
+        chain.clear()
+        chain.set_table(chain_table(update))
+        assert chain.model.rowCount() > 0
+        assert chain._expiry.count() > 1

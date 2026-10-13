@@ -8,19 +8,24 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
 from volsurface.app.lab import (
+    VANILLA_METRICS,
+    HoverInfo,
     McInputs,
     McOutcome,
     NewtonInputs,
     NewtonTrace,
+    VanillaCurves,
     VanillaInputs,
     VanillaQuote,
     price_vanilla,
     run_monte_carlo,
     trace_newton,
+    vanilla_curves,
 )
 from volsurface.pricing.backends import PricingBackend
 from volsurface.pricing.montecarlo import PayoffKind
 from volsurface.ui import theme
+from volsurface.ui.widgets.hover import HoverProbe
 
 
 def _spin(
@@ -57,8 +62,15 @@ def _plot(x_label: str, y_label: str) -> pg.PlotWidget:
     return plot
 
 
+_SERIES_STYLES = (
+    (theme.ACCENT, QtCore.Qt.PenStyle.SolidLine),
+    (theme.ACCENT_2, QtCore.Qt.PenStyle.SolidLine),
+    (theme.MUTED, QtCore.Qt.PenStyle.DashLine),
+)
+
+
 class VanillaTab(QtWidgets.QWidget):
-    """European value and Greeks next to the American tree value."""
+    """European value and Greeks next to the American tree value, with a chart over spot."""
 
     def __init__(self, backend: PricingBackend, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -89,14 +101,76 @@ class VanillaTab(QtWidgets.QWidget):
         self._output = QtWidgets.QLabel()
         self._output.setTextFormat(QtCore.Qt.TextFormat.RichText)
         self._output.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        self._output.setMinimumWidth(230)
+        self.chart_metric = QtWidgets.QComboBox()
+        self.chart_metric.addItems(VANILLA_METRICS)
+        self._legend = QtWidgets.QLabel()
+        self._legend.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self._plot = _plot("spot", "option value")
+        self._series = [self._plot.plot() for _ in _SERIES_STYLES]
+        for curve, (colour, style) in zip(self._series, _SERIES_STYLES, strict=True):
+            curve.setPen(pg.mkPen(colour, width=2, style=style))
+        self._spot_line = self._reference_line(theme.TEXT, "spot", 0.93)
+        self._strike_line = self._reference_line(theme.MUTED, "strike", 0.80)
+        self._curve_data: VanillaCurves | None = None
+        self._probe = HoverProbe(self._plot, self._describe)
+        header = QtWidgets.QHBoxLayout()
+        header.addWidget(QtWidgets.QLabel("Chart"))
+        header.addWidget(self.chart_metric)
+        header.addWidget(self._legend, 1)
+        chart = QtWidgets.QVBoxLayout()
+        chart.addLayout(header)
+        chart.addWidget(self._plot, 1)
         layout = QtWidgets.QHBoxLayout(self)
         layout.addWidget(_scrolling(form))
-        layout.addWidget(self._output, 1)
+        layout.addLayout(chart, 1)
+        layout.addWidget(self._output)
         for widget in (self.spot, self.strike, self.days, self.rate, self.dividend, self.vol):
             widget.valueChanged.connect(self.recompute)
         self.right.currentIndexChanged.connect(self.recompute)
         self.steps.valueChanged.connect(self.recompute)
+        self.chart_metric.currentIndexChanged.connect(self._draw_curves)
         self.recompute()
+
+    def _reference_line(self, colour: str, label: str, position: float) -> pg.InfiniteLine:
+        line = pg.InfiniteLine(
+            angle=90,
+            pen=pg.mkPen(colour, width=1, style=QtCore.Qt.PenStyle.DotLine),
+            label=label,
+            labelOpts={"position": position, "color": colour, "movable": False},
+        )
+        self._plot.addItem(line)
+        return line
+
+    def _describe(self, spot: float) -> HoverInfo | None:
+        if self._curve_data is None:
+            return None
+        return self._curve_data.hover(spot, self.chart_metric.currentText())
+
+    def _draw_curves(self, *_: object) -> None:
+        self._probe.hide()
+        data = self._curve_data
+        if data is None:
+            for curve in self._series:
+                curve.setData([], [])
+            self._legend.setText("")
+            return
+        metric = self.chart_metric.currentText()
+        shown = data.series(metric)
+        for index, curve in enumerate(self._series):
+            if index < len(shown):
+                curve.setData(data.spots, shown[index][1])
+            else:
+                curve.setData([], [])
+        self._plot.setLabel("left", "option value" if metric == "Value" else metric.lower())
+        self._spot_line.setValue(data.inputs.spot)
+        self._strike_line.setValue(data.inputs.strike)
+        self._legend.setText(
+            "&nbsp;&nbsp;".join(
+                f"<span style='color:{colour}'>&#9644;</span> {name}"
+                for (name, _), (colour, _) in zip(shown, _SERIES_STYLES, strict=False)
+            )
+        )
 
     def inputs(self) -> VanillaInputs:
         return VanillaInputs(
@@ -112,10 +186,15 @@ class VanillaTab(QtWidgets.QWidget):
 
     def recompute(self, *_: object) -> VanillaQuote | None:
         try:
-            quote = price_vanilla(self.inputs(), self._backend)
+            inputs = self.inputs()
+            quote = price_vanilla(inputs, self._backend)
+            self._curve_data = vanilla_curves(inputs, self._backend)
         except Exception as exc:
             self._output.setText(f"<span style='color:{theme.NEGATIVE}'>{exc}</span>")
+            self._curve_data = None
+            self._draw_curves()
             return None
+        self._draw_curves()
         rows = [
             ("Black-Scholes value", f"{quote.bs_price:.4f}"),
             ("American tree value", f"{quote.american_price:.4f}"),
@@ -132,7 +211,7 @@ class VanillaTab(QtWidgets.QWidget):
             f"<td align='right'>&nbsp;&nbsp;{v}</td></tr>"
             for k, v in rows
         )
-        self._output.setText(f"<table style='font-size:14px'>{body}</table>")
+        self._output.setText(f"<table style='font-size:13px'>{body}</table>")
         return quote
 
 
@@ -197,6 +276,8 @@ class MonteCarloTab(QtWidgets.QWidget):
         )
         self._reference.setVisible(False)
         self._plot.addItem(self._reference)
+        self._outcome: McOutcome | None = None
+        self._probe = HoverProbe(self._plot, self._describe)
         right = QtWidgets.QVBoxLayout()
         right.addWidget(self._plot, 1)
         right.addWidget(self._summary)
@@ -234,6 +315,9 @@ class MonteCarloTab(QtWidgets.QWidget):
         task.add_done_callback(self._finished)
         self._task = task
 
+    def _describe(self, paths: float) -> HoverInfo | None:
+        return None if self._outcome is None else self._outcome.hover(paths)
+
     def run_blocking(self) -> McOutcome:
         """Synchronous variant (tests, scripts)."""
         outcome = run_monte_carlo(self.inputs())
@@ -248,22 +332,15 @@ class MonteCarloTab(QtWidgets.QWidget):
             self._summary.setText(f"failed: {exc}")
 
     def show_outcome(self, outcome: McOutcome) -> None:
+        self._probe.hide()
+        self._outcome = outcome
         result = outcome.result
-        counts = result.counts
-        shown = counts >= max(500.0, 0.02 * counts[-1])
-        if shown.sum() < 3:
-            shown = np.ones_like(counts, dtype=bool)
-        price = result.running_price
-        upper = price + 2 * result.running_std_error
-        lower = price - 2 * result.running_std_error
-        self._line.setData(counts[shown], price[shown])
-        self._band.setCurves(
-            self._plot.plot(counts[shown], upper[shown]),
-            self._plot.plot(counts[shown], lower[shown]),
-        )
-        pad = 0.15 * float(np.max(upper[shown]) - np.min(lower[shown]) or 1.0)
-        self._plot.setYRange(float(np.min(lower[shown])) - pad, float(np.max(upper[shown])) + pad)
-        self._plot.setXRange(float(counts[shown][0]), float(counts[-1]), padding=0.02)
+        counts, price, lower, upper = outcome.convergence()
+        self._line.setData(counts, price)
+        self._band.setCurves(self._plot.plot(counts, upper), self._plot.plot(counts, lower))
+        pad = 0.15 * float(np.max(upper) - np.min(lower) or 1.0)
+        self._plot.setYRange(float(np.min(lower)) - pad, float(np.max(upper)) + pad)
+        self._plot.setXRange(float(counts[0]), float(counts[-1]), padding=0.02)
         low, high = result.ci95
         text = (
             f"{outcome.model_name}: {result.price:.4f} +/- {result.std_error:.4f}"
@@ -329,7 +406,13 @@ class NewtonTab(QtWidgets.QWidget):
         self.right.currentIndexChanged.connect(self.recompute)
         self.slider.valueChanged.connect(self._draw)
         self._trace: NewtonTrace | None = None
+        self._probe = HoverProbe(self._plot, self._describe)
         self.recompute()
+
+    def _describe(self, vol_pct: float) -> HoverInfo | None:
+        if self._trace is None:
+            return None
+        return self._trace.hover(vol_pct, upto=self.slider.value())
 
     def inputs(self) -> NewtonInputs:
         return NewtonInputs(
@@ -342,6 +425,7 @@ class NewtonTab(QtWidgets.QWidget):
         )
 
     def recompute(self, *_: object) -> NewtonTrace:
+        self._probe.hide()
         trace = trace_newton(self.inputs())
         self._trace = trace
         self._curve.setData(100 * trace.vols, trace.prices)
@@ -356,6 +440,7 @@ class NewtonTab(QtWidgets.QWidget):
         return trace
 
     def _draw(self, upto: int) -> None:
+        self._probe.hide()
         trace = self._trace
         if trace is None or not trace.steps:
             self._tangents.setData([], [])

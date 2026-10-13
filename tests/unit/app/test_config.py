@@ -19,6 +19,7 @@ def test_defaults_match_the_documented_values() -> None:
     assert settings.backend == "numba-cpu"
     assert settings.ibkr.port == 7497
     assert settings.ibkr.client_id == 35
+    assert settings.ibkr.market_data_type == 3
     assert settings.pipeline.max_days_to_expiry == 120
     assert settings.pipeline.tree_steps == 200
     assert settings.pipeline.flip_grid_points == 81
@@ -37,6 +38,24 @@ def test_environment_overrides_nested_fields(monkeypatch: pytest.MonkeyPatch) ->
 def test_dotenv_file_in_the_working_directory_is_read(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text("VOLSURFACE_IBKR__HOST=10.1.2.3\n")
     assert Settings().ibkr.host == "10.1.2.3"
+
+
+def test_the_committed_example_env_file_loads(tmp_path: Path) -> None:
+    example = Path(__file__).resolve().parents[3] / ".env.example"
+    (tmp_path / ".env").write_text(example.read_text())
+    settings = Settings()
+    assert settings.ibkr.port == 7497
+    assert settings.ibkr.market_data_type == 3
+
+
+def test_market_data_type_comes_from_the_environment_as_a_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VOLSURFACE_IBKR__MARKET_DATA_TYPE", "3")
+    assert Settings().ibkr.market_data_type == 3
+    monkeypatch.setenv("VOLSURFACE_IBKR__MARKET_DATA_TYPE", "7")
+    with pytest.raises(ValueError, match="market_data_type"):
+        Settings()
 
 
 def test_toml_file_takes_priority_over_the_environment(

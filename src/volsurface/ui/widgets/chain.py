@@ -32,6 +32,11 @@ class ChainTableModel(QtCore.QAbstractTableModel):
         super().__init__(parent)
         self._table: ChainTable | None = None
 
+    def clear(self) -> None:
+        self.beginResetModel()
+        self._table = None
+        self.endResetModel()
+
     def set_table(self, table: ChainTable) -> None:
         """Replace the data; keeps scroll position and selection when the size is unchanged."""
         if self._table is not None and self._table.rows == table.rows:
@@ -171,6 +176,16 @@ class ChainTableWidget(QtWidgets.QWidget):
         self._used.toggled.connect(self._on_filter)
         self._known: list[str] = []
         self.proxy.set_used_only(True)
+
+    def clear(self) -> None:
+        self.model.clear()
+        self._known = []
+        self._expiry.blockSignals(True)
+        self._expiry.clear()
+        self._expiry.addItem("all expiries", None)
+        self._expiry.blockSignals(False)
+        self.proxy.set_expiry(None)
+        self._count.setText("")
 
     def set_table(self, table: ChainTable) -> None:
         labels = [str(e) for e in table.expiries()]

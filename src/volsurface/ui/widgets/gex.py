@@ -47,6 +47,11 @@ class GexWidget(QtWidgets.QWidget):
         layout.addWidget(self._summary)
         layout.addWidget(self._alerts)
 
+    def clear(self) -> None:
+        self._line.setData([], [])
+        self._flip.setVisible(False)
+        self._summary.setText("no data yet")
+
     def set_view(self, view: GexView | None) -> None:
         if view is None:
             self._line.setData([], [])

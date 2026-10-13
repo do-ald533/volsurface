@@ -62,6 +62,23 @@ class SmileWidget(QtWidgets.QWidget):
         self._combo.currentIndexChanged.connect(self._on_choice)
         self._last: SessionUpdate | None = None
 
+    def clear(self) -> None:
+        self._last = None
+        self._expiries = []
+        self._combo.blockSignals(True)
+        self._combo.clear()
+        self._combo.blockSignals(False)
+        self._clear_points()
+        self._status.setText("no data yet")
+        self._status.setObjectName("muted")
+        self._status.style().unpolish(self._status)
+        self._status.style().polish(self._status)
+
+    def _clear_points(self) -> None:
+        self._curve.setData([], [])
+        for item in (self._used, self._unused, self._vendor):
+            item.setData([], [])
+
     def set_update(self, update: SessionUpdate) -> None:
         self._last = update
         surface = update.surface
@@ -85,6 +102,7 @@ class SmileWidget(QtWidgets.QWidget):
 
     def _draw(self, view: SmileView | None) -> None:
         if view is None:
+            self._clear_points()
             self._status.setText("no fitted expiry")
             return
         self._curve.setData(view.k_curve, view.iv_curve_pct)
@@ -126,6 +144,9 @@ class TermStructureWidget(QtWidgets.QWidget):
 
     def set_term_structure(self, structure: TermStructure) -> None:
         self._line.setData(structure.days, structure.atm_vol_pct)
+
+    def clear(self) -> None:
+        self._line.setData([], [])
 
     def sizeHint(self) -> QtCore.QSize:
         return QtCore.QSize(560, 330)

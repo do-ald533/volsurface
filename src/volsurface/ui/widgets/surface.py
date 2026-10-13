@@ -86,6 +86,11 @@ class HeatmapWidget(pg.PlotWidget):  # type: ignore[misc]
     def has_data(self) -> bool:
         return self._has_data
 
+    def clear_data(self) -> None:
+        """Not ``clear``: ``PlotWidget`` copies that name from its plot, which deletes the image."""
+        self._image.clear()
+        self._has_data = False
+
     def set_mesh(self, mesh: SurfaceMesh) -> None:
         low, high = mesh.vol_range
         if high - low < 1e-9:
@@ -140,6 +145,11 @@ class Surface3DWidget(QtWidgets.QWidget):
     def available(self) -> bool:
         return self._view is not None
 
+    def clear(self) -> None:
+        if self._surface is not None:
+            self._surface.setData(**_seed_data())
+            self._draw_labels([])
+
     def set_mesh(self, mesh: SurfaceMesh) -> None:
         if self._surface is None:
             return
@@ -171,6 +181,22 @@ class SurfacePanel(QtWidgets.QTabWidget):
         self.addTab(self.heatmap, "Heatmap")
         if not self.surface3d.available:
             self.setCurrentWidget(self.heatmap)
+        self._notice = QtWidgets.QLabel("")
+        self._notice.setObjectName("muted")
+        self.setCornerWidget(self._notice, QtCore.Qt.Corner.TopRightCorner)
+
+    @property
+    def notice(self) -> str:
+        return str(self._notice.text())
+
+    def set_notice(self, text: str) -> None:
+        """A short status line in the tab bar for when there is nothing to draw yet."""
+        self._notice.setText(text)
+
+    def clear_data(self) -> None:
+        """Not ``clear``: ``QTabWidget.clear`` removes the tabs."""
+        self.surface3d.clear()
+        self.heatmap.clear_data()
 
     def set_mesh(self, mesh: SurfaceMesh | None) -> None:
         if mesh is None:
