@@ -1,0 +1,185 @@
+[project]
+name = "volsurface"
+version = "0.1.0"
+description = "Desktop workstation for implied-volatility surfaces: SVI fits with no-arbitrage checks, American-option pricing, GEX analytics and a Monte Carlo lab."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "do-ald533", email = "douglas.aldred533@gmail.com" }]
+requires-python = ">=3.13,<3.14"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Typing :: Typed",
+]
+dependencies = [
+    "numpy>=2.2,<2.5",
+    "scipy>=1.15,<2",
+    "numba>=0.61",
+    "polars>=2,<3",
+    "pydantic>=2.8,<3",
+    "pydantic-settings>=2.4,<3",
+    "structlog>=24.1",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+ui = [
+    "PySide6>=6.8",
+    "pyqtgraph>=0.14",
+    "PyOpenGL>=3.1.7",
+    "qasync>=0.28",
+]
+ibkr = ["ib_async>=2.1"]
+gpu = ["numba-cuda[cu13]>=0.30"]
+
+[project.scripts]
+volsurface = "volsurface.cli:app"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.100",
+    "import-linter>=2.0",
+    "mypy>=1.11",
+    "pre-commit>=3.8",
+    "pytest>=8.3",
+    "pytest-asyncio>=1.0",
+    "pytest-benchmark>=5.0",
+    "pytest-cov>=5.0",
+    "pytest-qt>=4.4",
+    "ruff>=0.6",
+    "scipy-stubs",
+]
+oracle = ["QuantLib"]
+notebooks = ["matplotlib>=3.9"]
+
+[build-system]
+requires = ["uv_build>=0.11.12,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+default-groups = ["dev", "oracle"]
+link-mode = "copy"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+extend-exclude = ["references"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "N",
+    "SIM",
+    "C4",
+    "PT",
+    "RUF",
+    "NPY",
+    "PERF",
+    "TC",
+    "PL",
+]
+ignore = [
+    "PLR2004",
+    "PLR0913", "PLR0917",
+    "N803", "N806",
+    "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR0915", "S101", "E501", "PT018"]
+"notebooks/**" = ["E501"]
+"src/volsurface/pricing/crr_kernels.py" = ["PLR0912", "PLR0915"]
+"src/volsurface/pricing/bs_kernels.py" = ["PLR0911"]
+"src/volsurface/ui/**" = ["N802"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.13"
+mypy_path = "src"
+packages = ["volsurface"]
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+check_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = [
+    "volsurface.domain.*",
+    "volsurface.pricing.*",
+    "volsurface.surface.*",
+    "volsurface.analytics.*",
+]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["numba.*", "pyqtgraph.*", "ib_async.*", "qasync.*", "OpenGL.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config -m 'not perf'"
+markers = [
+    "perf: performance benchmarks (deselected by default)",
+    "ui: needs Qt (runs on the offscreen platform)",
+    "oracle: needs the optional QuantLib oracle",
+    "slow: slower than ~1 s",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["volsurface"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "\\.\\.\\."]
+show_missing = true
+
+[tool.importlinter]
+root_package = "volsurface"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Pure core never imports GUI, broker or event-loop frameworks"
+type = "forbidden"
+source_modules = [
+    "volsurface.domain",
+    "volsurface.pricing",
+    "volsurface.surface",
+    "volsurface.analytics",
+    "volsurface.eventing",
+]
+forbidden_modules = ["PySide6", "pyqtgraph", "OpenGL", "ib_async", "qasync"]
+
+[[tool.importlinter.contracts]]
+name = "Layered architecture (outer layers may import inner ones, never the reverse)"
+type = "layers"
+layers = [
+    "volsurface.ui",
+    "volsurface.app",
+    "volsurface.marketdata | volsurface.eventing",
+    "volsurface.analytics | volsurface.surface",
+    "volsurface.pricing",
+    "volsurface.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "UI reaches market data only through the application layer"
+type = "forbidden"
+source_modules = ["volsurface.ui"]
+forbidden_modules = ["volsurface.marketdata"]
+allow_indirect_imports = true
