@@ -8,6 +8,7 @@ means it is unit-tested without a display, and the widgets stay thin glue.
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
 import numpy as np
 
@@ -75,6 +76,86 @@ def surface_gl_arrays(
     x = np.linspace(-extent / 2, extent / 2, mesh.k.size)
     y = np.linspace(-extent / 2, extent / 2, mesh.days.size)
     return SurfaceGlArrays(x=x, y=y, z=(unit * height).T, unit=unit.T)
+
+
+@dataclass(frozen=True, slots=True)
+class AxisLabel:
+    """One text label of the 3D view, in scene coordinates; ``title`` marks an axis title."""
+
+    pos: tuple[float, float, float]
+    text: str
+    title: bool = False
+    align: Literal["left", "center", "right"] = "left"
+
+
+def nice_ticks(lo: float, hi: float, target: int = 5) -> list[float]:
+    """About ``target`` round tick values in ``[lo, hi]``, spaced 1, 2 or 5 times a power of 10."""
+    if not (np.isfinite(lo) and np.isfinite(hi)) or hi < lo:
+        return []
+    if hi - lo < 1e-12:
+        return [float(lo)]
+    raw = (hi - lo) / max(target, 1)
+    power = 10.0 ** float(np.floor(np.log10(raw)))
+    step = next(m * power for m in (1.0, 2.0, 5.0, 10.0) if m * power >= raw * (1.0 - 1e-9))
+    first = int(np.ceil(lo / step - 1e-9))
+    last = int(np.floor(hi / step + 1e-9))
+    return [round(i * step, 10) for i in range(first, last + 1)]
+
+
+def _tick_text(value: float, step: float, *, signed: bool = False, suffix: str = "") -> str:
+    decimals = max(0, int(np.ceil(-np.log10(step) - 1e-9)))
+    sign = "+" if signed else ""
+    return f"{value:{sign}.{decimals}f}{suffix}"
+
+
+def _scene_position(value: float, lo: float, hi: float, start: float, stop: float) -> float:
+    if hi - lo < 1e-9:
+        return 0.5 * (start + stop)
+    return start + (stop - start) * (value - lo) / (hi - lo)
+
+
+def surface_axis_labels(
+    mesh: SurfaceMesh, *, extent: float = 10.0, height: float = 4.0
+) -> list[AxisLabel]:
+    """Axis titles and round tick labels for the box drawn by :func:`surface_gl_arrays`.
+
+    The camera looks at the corner ``(+x, -y)``: strikes run along the front edge, expiries along
+    the right edge and volatility up the left corner post.
+    """
+    half, pad = extent / 2, 0.9
+    k_lo, k_hi = float(mesh.k[0]), float(mesh.k[-1])
+    d_lo, d_hi = float(mesh.days[0]), float(mesh.days[-1])
+    v_lo, v_hi = mesh.vol_range
+    labels = [
+        AxisLabel(
+            (0.0, -half - pad, -2.0),
+            "Log-moneyness  k = ln(K/F)    ← lower strikes | higher strikes →",
+            title=True,
+            align="center",
+        ),
+        AxisLabel((half + 3.6, 0.0, 0.0), "Days to expiry", title=True),
+        AxisLabel(
+            (-half - pad, -half - pad, height + 1.0), "Implied vol (%)", title=True, align="center"
+        ),
+    ]
+    k_ticks = nice_ticks(k_lo, k_hi)
+    k_step = k_ticks[1] - k_ticks[0] if len(k_ticks) > 1 else 1.0
+    for tick in k_ticks:
+        text = "ATM" if abs(tick) < 1e-9 else _tick_text(tick, k_step, signed=True)
+        x = _scene_position(tick, k_lo, k_hi, -half, half)
+        labels.append(AxisLabel((x, -half - pad, 0.0), text, align="center"))
+    d_ticks = nice_ticks(d_lo, d_hi)
+    d_step = d_ticks[1] - d_ticks[0] if len(d_ticks) > 1 else 1.0
+    for tick in d_ticks:
+        y = _scene_position(tick, d_lo, d_hi, -half, half)
+        labels.append(AxisLabel((half + pad, y, 0.0), _tick_text(tick, d_step, suffix=" d")))
+    v_ticks = nice_ticks(v_lo, v_hi)
+    v_step = v_ticks[1] - v_ticks[0] if len(v_ticks) > 1 else 1.0
+    for tick in v_ticks:
+        z = _scene_position(tick, v_lo, v_hi, 0.0, height)
+        text = _tick_text(tick, v_step, suffix="%")
+        labels.append(AxisLabel((-half - pad, -half - pad, z), text, align="right"))
+    return labels
 
 
 @dataclass(frozen=True, slots=True, eq=False)

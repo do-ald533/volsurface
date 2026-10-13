@@ -5,12 +5,64 @@ heatmap is plain 2D and always works. Both are fed the same :class:`SurfaceMesh`
 only replaces data, so the user's camera angle survives every refresh.
 """
 
+from typing import Any
+
+import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from volsurface.app.viewmodels import SurfaceMesh, surface_gl_arrays
+from volsurface.app.viewmodels import AxisLabel, SurfaceMesh, surface_axis_labels, surface_gl_arrays
 from volsurface.ui import theme
 from volsurface.ui.gl_support import opengl_available
+
+
+def _seed_data() -> dict[str, np.ndarray]:
+    """Arrays for the empty placeholder surface; pyqtgraph needs ndarrays, not lists."""
+    axis = np.array([-5.0, 5.0])
+    return {"x": axis, "y": axis.copy(), "z": np.zeros((2, 2))}
+
+
+def _mesh_data(mesh: SurfaceMesh) -> dict[str, np.ndarray]:
+    """``GLSurfacePlotItem.setData`` arguments; colours go in as one RGBA row per vertex."""
+    arrays = surface_gl_arrays(mesh)
+    colours = theme.colour_values(arrays.unit).reshape(-1, 4).astype(np.float32)
+    return {"x": arrays.x, "y": arrays.y, "z": arrays.z, "colors": colours}
+
+
+def _edge_data(extent: float = 10.0, height: float = 4.0) -> dict[str, object]:
+    """Three bold box edges (strike, expiry, volatility) that the axis labels sit along."""
+    half = extent / 2
+    segments = np.array(
+        [
+            [-half, -half, 0.0],
+            [half, -half, 0.0],
+            [half, -half, 0.0],
+            [half, half, 0.0],
+            [-half, -half, 0.0],
+            [-half, -half, height],
+        ]
+    )
+    return {"pos": segments, "color": pg.mkColor(theme.MUTED).getRgbF()}
+
+
+_ALIGNMENT = {
+    "left": QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+    "center": QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter,
+    "right": QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
+}
+
+
+def style_label(
+    item: Any, label: AxisLabel, tick_font: QtGui.QFont, title_font: QtGui.QFont
+) -> None:
+    """Point a ``GLTextItem`` at ``label``: titles bright and bold, ticks small and muted."""
+    item.setData(
+        pos=label.pos,
+        text=label.text,
+        color=theme.TEXT if label.title else theme.MUTED,
+        font=title_font if label.title else tick_font,
+        alignment=_ALIGNMENT[label.align],
+    )
 
 
 class HeatmapWidget(pg.PlotWidget):  # type: ignore[misc]
@@ -54,9 +106,9 @@ class Surface3DWidget(QtWidgets.QWidget):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self._view: object | None = None
-        self._surface: object | None = None
-        self._labels: list[object] = []
+        self._view: Any | None = None
+        self._surface: Any | None = None
+        self._labels: list[Any] = []
         if not opengl_available():
             note = QtWidgets.QLabel(
                 "3D view unavailable: this Qt platform has no OpenGL support.\n"
@@ -75,17 +127,14 @@ class Surface3DWidget(QtWidgets.QWidget):
         grid.setSize(10, 10)
         grid.setSpacing(1, 1)
         view.addItem(grid)
-        surface = gl.GLSurfacePlotItem(
-            x=[-5.0, 5.0], y=[-5.0, 5.0], z=[[0.0, 0.0], [0.0, 0.0]], shader="shaded"
-        )
+        surface = gl.GLSurfacePlotItem(**_seed_data(), shader="shaded")
         view.addItem(surface)
-        for _ in range(6):
-            label = gl.GLTextItem(text="", color=QtGui.QColor(theme.MUTED))
-            view.addItem(label)
-            self._labels.append(label)
+        view.addItem(gl.GLLinePlotItem(**_edge_data(), mode="lines", width=2.0, antialias=True))
         layout.addWidget(view)
         self._view, self._surface = view, surface
         self._gl = gl
+        self._tick_font = QtGui.QFont("Helvetica", 9)
+        self._title_font = QtGui.QFont("Helvetica", 11, QtGui.QFont.Weight.Bold)
 
     @property
     def available(self) -> bool:
@@ -94,20 +143,21 @@ class Surface3DWidget(QtWidgets.QWidget):
     def set_mesh(self, mesh: SurfaceMesh) -> None:
         if self._surface is None:
             return
-        arrays = surface_gl_arrays(mesh)
-        colours = theme.colour_values(arrays.unit)
-        self._surface.setData(x=arrays.x, y=arrays.y, z=arrays.z, colors=colours)  # type: ignore[attr-defined]
-        low, high = mesh.vol_range
-        marks = [
-            ((-5.6, -5.6, 0.0), f"k {mesh.k[0]:+.2f}"),
-            ((5.6, -5.6, 0.0), f"k {mesh.k[-1]:+.2f}"),
-            ((-5.8, -5.0, 0.0), f"{mesh.days[0]:.0f} d"),
-            ((-5.8, 5.0, 0.0), f"{mesh.days[-1]:.0f} d"),
-            ((-6.0, -6.0, 0.0), f"IV {low:.1f}%"),
-            ((-6.0, -6.0, 4.2), f"IV {high:.1f}%"),
-        ]
-        for label, (pos, text) in zip(self._labels, marks, strict=True):
-            label.setData(pos=pos, text=text)  # type: ignore[attr-defined]
+        self._surface.setData(**_mesh_data(mesh))
+        self._draw_labels(surface_axis_labels(mesh))
+
+    def _draw_labels(self, labels: list[AxisLabel]) -> None:
+        if self._view is None:
+            return
+        while len(self._labels) < len(labels):
+            item = self._gl.GLTextItem(text="")
+            self._view.addItem(item)
+            self._labels.append(item)
+        for index, item in enumerate(self._labels):
+            if index < len(labels):
+                style_label(item, labels[index], self._tick_font, self._title_font)
+            else:
+                item.setData(text="")
 
 
 class SurfacePanel(QtWidgets.QTabWidget):

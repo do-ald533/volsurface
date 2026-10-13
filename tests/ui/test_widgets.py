@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 from pytestqt.qtbot import QtBot
 
 from volsurface.analytics.alerts import Alert, AlertKind
@@ -12,6 +12,7 @@ from volsurface.app.session_state import SessionState
 from volsurface.app.viewmodels import (
     chain_table,
     gex_view,
+    surface_axis_labels,
     surface_mesh,
     term_structure,
 )
@@ -23,12 +24,22 @@ from volsurface.ui.widgets.diagnostics import DiagnosticsWidget
 from volsurface.ui.widgets.gex import MAX_ALERTS, GexWidget
 from volsurface.ui.widgets.lab import MonteCarloTab, NewtonTab, PricingLabWidget, VanillaTab
 from volsurface.ui.widgets.smile import SmileWidget, TermStructureWidget
-from volsurface.ui.widgets.surface import HeatmapWidget, Surface3DWidget, SurfacePanel
+from volsurface.ui.widgets.surface import (
+    HeatmapWidget,
+    Surface3DWidget,
+    SurfacePanel,
+    _edge_data,
+    _mesh_data,
+    _seed_data,
+    style_label,
+)
 
 pytestmark = pytest.mark.ui
 
 
-def test_opengl_is_reported_unavailable_on_the_offscreen_platform() -> None:
+def test_opengl_is_reported_unavailable_on_the_offscreen_platform(
+    qapp: QtWidgets.QApplication,
+) -> None:
     assert not opengl_available()
 
 
@@ -86,6 +97,36 @@ class TestSurfacePanel:
         mesh = surface_mesh(update.surface)
         assert mesh is not None
         widget.set_mesh(mesh)
+
+    def test_gl_surface_item_accepts_the_seed_and_mesh_data(self, update: SessionUpdate) -> None:
+        gl = pytest.importorskip("pyqtgraph.opengl")
+        assert update.surface is not None
+        mesh = surface_mesh(update.surface)
+        assert mesh is not None
+        item = gl.GLSurfacePlotItem(**_seed_data(), shader="shaded")
+        item.setData(**_mesh_data(mesh))
+        n_vertices = mesh.k.size * mesh.days.size
+        assert item._meshdata.vertexes().shape == (n_vertices, 3)
+        assert item._meshdata.vertexColors().shape == (n_vertices, 4)
+        smaller = replace(mesh, k=mesh.k[::2], iv_pct=mesh.iv_pct[:, ::2])
+        item.setData(**_mesh_data(smaller))
+        assert item._meshdata.vertexes().shape == (smaller.k.size * smaller.days.size, 3)
+
+    def test_gl_text_and_edge_items_accept_the_axis_labels(self, update: SessionUpdate) -> None:
+        gl = pytest.importorskip("pyqtgraph.opengl")
+        assert update.surface is not None
+        mesh = surface_mesh(update.surface)
+        assert mesh is not None
+        tick_font, title_font = QtGui.QFont("Helvetica", 9), QtGui.QFont("Helvetica", 11)
+        labels = surface_axis_labels(mesh)
+        for label in labels:
+            item = gl.GLTextItem(text="")
+            style_label(item, label, tick_font, title_font)
+            assert item.text == label.text
+            assert tuple(item.pos) == label.pos
+            assert item.font is (title_font if label.title else tick_font)
+        edges = gl.GLLinePlotItem(**_edge_data(), mode="lines", width=2.0, antialias=True)
+        assert edges.pos.shape == (6, 3)
 
 
 class TestSmile:

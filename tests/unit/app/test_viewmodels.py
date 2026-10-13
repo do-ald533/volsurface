@@ -3,6 +3,8 @@ from datetime import date
 
 import numpy as np
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from helpers import small_chain
 from volsurface.app.config import PipelineSettings
@@ -16,7 +18,9 @@ from volsurface.app.viewmodels import (
     format_diagnostics,
     gex_view,
     iv_comparison,
+    nice_ticks,
     smile_view,
+    surface_axis_labels,
     surface_gl_arrays,
     surface_mesh,
     term_structure,
@@ -81,6 +85,85 @@ def test_gl_arrays_for_a_flat_surface(update: SessionUpdate) -> None:
     arrays = surface_gl_arrays(flat)
     assert np.all(arrays.unit == 0.5)
     assert np.isfinite(arrays.z).all()
+
+
+@pytest.mark.parametrize(
+    ("lo", "hi", "expected"),
+    [
+        (0.0, 1.0, [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]),
+        (-0.25, 0.25, [-0.2, -0.1, 0.0, 0.1, 0.2]),
+        (7.0, 91.0, [20.0, 40.0, 60.0, 80.0]),
+        (14.3, 15.9, [14.5, 15.0, 15.5]),
+        (3.0, 3.0, [3.0]),
+        (5.0, 1.0, []),
+        (0.0, float("nan"), []),
+    ],
+)
+def test_nice_ticks_are_round_and_inside_the_range(
+    lo: float, hi: float, expected: list[float]
+) -> None:
+    assert nice_ticks(lo, hi) == pytest.approx(expected)
+
+
+@given(
+    lo=st.floats(-1e3, 1e3),
+    span=st.floats(1e-3, 1e3),
+    target=st.integers(2, 9),
+)
+def test_nice_ticks_stay_inside_and_are_evenly_spaced(lo: float, span: float, target: int) -> None:
+    hi = lo + span
+    ticks = nice_ticks(lo, hi, target)
+    tolerance = 1e-8 * span
+    assert all(lo - tolerance <= t <= hi + tolerance for t in ticks)
+    assert len(ticks) <= 2 * target + 2
+    if len(ticks) > 2:
+        gaps = np.diff(ticks)
+        assert np.allclose(gaps, gaps[0], rtol=1e-6, atol=1e-9)
+
+
+def test_axis_labels_name_all_three_axes_and_sit_inside_the_box(update: SessionUpdate) -> None:
+    assert update.surface is not None
+    mesh = surface_mesh(update.surface)
+    assert mesh is not None
+    labels = surface_axis_labels(mesh, extent=10.0, height=4.0)
+    titles = [label.text for label in labels if label.title]
+    assert len(titles) == 3
+    assert any("ln(K/F)" in t for t in titles)
+    assert any("Days to expiry" in t for t in titles)
+    assert any("Implied vol" in t for t in titles)
+    ticks = [label for label in labels if not label.title]
+    assert any(label.text == "ATM" for label in ticks)
+    assert sum(label.text.endswith(" d") for label in ticks) >= 2
+    assert sum(label.text.endswith("%") for label in ticks) >= 2
+    for label in ticks:
+        x, y, z = label.pos
+        assert -7.0 <= x <= 7.0 and -7.0 <= y <= 7.0 and 0.0 <= z <= 4.0
+
+
+def test_axis_tick_positions_follow_the_data(update: SessionUpdate) -> None:
+    assert update.surface is not None
+    mesh = surface_mesh(update.surface)
+    assert mesh is not None
+    labels = surface_axis_labels(mesh, extent=10.0, height=4.0)
+    k_lo, k_hi = float(mesh.k[0]), float(mesh.k[-1])
+    atm = next(label for label in labels if label.text == "ATM")
+    assert atm.pos[0] == pytest.approx(-5.0 + 10.0 * (0.0 - k_lo) / (k_hi - k_lo))
+    low, high = mesh.vol_range
+    for label in labels:
+        if not label.title and label.text.endswith("%"):
+            vol = float(label.text.removesuffix("%"))
+            assert label.pos[2] == pytest.approx(4.0 * (vol - low) / (high - low), abs=0.02)
+
+
+def test_axis_labels_for_a_flat_surface_do_not_divide_by_zero(update: SessionUpdate) -> None:
+    assert update.surface is not None
+    mesh = surface_mesh(update.surface)
+    assert mesh is not None
+    flat = replace(mesh, iv_pct=np.full_like(mesh.iv_pct, 20.0))
+    labels = surface_axis_labels(flat)
+    vol_ticks = [label for label in labels if not label.title and label.text.endswith("%")]
+    assert [label.text for label in vol_ticks] == ["20%"]
+    assert vol_ticks[0].pos[2] == pytest.approx(2.0)
 
 
 def test_smile_view_pairs_quotes_with_the_fitted_curve(update: SessionUpdate) -> None:
