@@ -55,4 +55,4 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
-      - run: uv run pytest -m perf tests/perf --benchmark-only --benchmark-min-rounds=3
+      - run: uv run pytest -p no:pytest-qt -m perf tests/perf --benchmark-only --benchmark-min-rounds=3
